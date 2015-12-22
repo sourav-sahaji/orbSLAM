@@ -6,7 +6,7 @@
  */
 
 #include "Utils.h"
-
+#define VIDEO_CAM       1
 
 namespace utils
 {
@@ -79,15 +79,24 @@ namespace image
 	RateLimitedImagePublisher::RateLimitedImagePublisher(): ImagePublisher(), rate(30){}
 	RateLimitedImagePublisher::RateLimitedImagePublisher(const float rate, const std::string& topic): ImagePublisher(topic), rate(rate){}
 
-	void RateLimitedImagePublisher::readFileAndPublish(const char* filename, bool show, int start)
+    void RateLimitedImagePublisher::readFileAndPublish(const char* filename, bool show, int start)
 	{
-		std::ifstream in(filename);
+        int count = 0;
+#if(VIDEO_CAM != 1)
+        std::ifstream in(filename);
 		char imageName[1024];
-		int count = 0;
+#else
+        cv::VideoCapture cap1(0);
+        cv::Mat im;
+        cap1 >> im;
+#endif
 
+#if(VIDEO_CAM == 1)
+        while(!im.empty())
+#else
 		while(in.good() and in.peek()!=in.eof())
+#endif
 		{
-			in>>imageName;
 			if(count < start )
 			{
 				count++;
@@ -95,8 +104,13 @@ namespace image
 			}
 
 
-			cv::Mat im = cv::imread(imageName,CV_LOAD_IMAGE_UNCHANGED);
-			std::cerr<<"INFO: [ImagePublisher] :"<<topic<<" "<<imageName<<std::endl;
+#if(VIDEO_CAM != 1)
+            in>>imageName;
+            cv::Mat im = cv::imread(imageName,CV_LOAD_IMAGE_UNCHANGED);
+            std::cerr<<"INFO: [ImagePublisher] :"<<topic<<" "<<imageName<<std::endl;
+#else
+            cap1 >> im;
+#endif
 			Publish(im);
 			if(show)
 			{
