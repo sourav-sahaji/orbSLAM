@@ -787,7 +787,7 @@ int ORBmatcher::SearchByBoW(KeyFrame *pKF1, KeyFrame *pKF2, vector<MapPoint *> &
                         }
                     }
 
-                    if(bestDist1<TH_LOW)
+                    if(bestDist1<80)
                     {
                         if(static_cast<float>(bestDist1)<mfNNratio*static_cast<float>(bestDist2))
                         {

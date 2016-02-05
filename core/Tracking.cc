@@ -167,9 +167,20 @@ bool Tracking::Start()
 	lcm::LCM lcm;
 	lcm.subscribe("/image_raw",&Tracking::ReceiveImage,this);
 
-	while(0 == lcm.handle());
+    while(1)
+    {
+        int val = lcm.handleTimeout(3000);
 
-	return false;
+        if( (val == 0 && mState != NO_IMAGES_YET) || val < 0)
+        {
+            cerr << "No images to fetch since last 3 seconds" << endl;
+            break;
+        }
+    }
+
+    mbDone = true;
+
+    return false;
 }
 
 bool Tracking::Done()
@@ -181,6 +192,7 @@ void Tracking::ReceiveImage(const lcm::ReceiveBuffer* rbuf,const std::string& ch
 {
 	cv::Mat T_cw; double timestamp = 0;
 	cv::Mat im = utils::image::toMat(*msg);
+    timestamp = msg->utime;
 	if(!Run(im, T_cw, timestamp))
 		std::cerr<<"Something went wrong while tracking!"<<std::endl;
 }
@@ -234,6 +246,15 @@ bool Tracking::Run(const cv::Mat& im_in, cv::Mat& T_cw, double timestamp_sec)
         // Initial Camera Pose Estimation from Previous Frame (Motion Model or Coarse) or Relocalisation
         if(mState==WORKING && !RelocalisationRequested())
         {
+//            int pCounter = 0;
+//            for(int i1=0; i1<mLastFrame.mvpMapPoints.size(); i1++)
+//            {
+//                if(mLastFrame.mvpMapPoints[i1])
+//                    pCounter++;
+//            }
+
+//            cout << "last points " << pCounter << " out of " << mLastFrame.mvpMapPoints.size() << endl;
+
             if(!mbMotionModel || mpMap->KeyFramesInMap()<4 || mVelocity.empty() || mCurrentFrame.mnId<mnLastRelocFrameId+2)
                 bOK = TrackPreviousFrame();
             else

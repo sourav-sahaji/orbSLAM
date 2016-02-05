@@ -181,6 +181,9 @@ bool MapVisualizer::UpdateLoop()
 		window->spinOnce(1,true);  // Update Display
 
 	}
+
+    window->saveScreenshot("mapImage.png");
+
 	window->removeAllWidgets();
 	window->close();
 	windowImage->close();
@@ -227,7 +230,7 @@ MapVisualizer::MapVisualizer():
 
 MapVisualizer::~MapVisualizer()
 {
-	delete lcmInstance;
+    delete lcmInstance;
 }
 void MapVisualizer::listenTo(const std::string& MapChannel, const std::string& ImageChannel, const std::string& currentPoseChannel)
 {

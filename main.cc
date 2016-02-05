@@ -86,6 +86,7 @@ int main(int argc, char **argv)
         //ros::shutdown();
         return 1;
     }
+
     ORB_SLAM::ORBVocabulary Vocabulary;
     Vocabulary.load(fsVoc);
 
@@ -114,14 +115,17 @@ int main(int argc, char **argv)
 
     //Initialize the Loop Closing Thread and launch
     ORB_SLAM::LoopClosing LoopCloser(&World, &Database, &Vocabulary);
-    std::thread loopClosingThread(&ORB_SLAM::LoopClosing::Run, &LoopCloser);
-
+#if(SSLC == 1)
+    std::thread loopClosingThread(&ORB_SLAM::LoopClosing::Start, &LoopCloser);
+#else
+//    std::thread loopClosingThread(&ORB_SLAM::LoopClosing::Run, &LoopCloser);
+#endif
     //Set pointers between threads
     Tracker.SetLocalMapper(&LocalMapper);
-    Tracker.SetLoopClosing(&LoopCloser);
+//    Tracker.SetLoopClosing(&LoopCloser);
 
     LocalMapper.SetTracker(&Tracker);
-    LocalMapper.SetLoopCloser(&LoopCloser);
+//    LocalMapper.SetLoopCloser(&LoopCloser);
 
     LoopCloser.SetTracker(&Tracker);
     LoopCloser.SetLocalMapper(&LocalMapper);
@@ -170,6 +174,7 @@ int main(int argc, char **argv)
           << " " << q[0] << " " << q[1] << " " << q[2] << " " << q[3] << endl;
 
     }
+
     f.close();
 
     std::cerr<<"All done, dude!"<<std::endl;

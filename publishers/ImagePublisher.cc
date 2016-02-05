@@ -24,7 +24,7 @@ int main(int argc, char** argv)
 	std::cerr<<"Starting from "<<startFrom<<std::endl;
 
 	utils::image::RateLimitedImagePublisher p(atof(argv[3]),argv[2]);
-	p.readFileAndPublish(argv[1],true,startFrom);
+    p.readFileAndPublish(argv[1],false,startFrom);
 	return 0;
 }
 

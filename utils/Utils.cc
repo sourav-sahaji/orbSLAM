@@ -82,19 +82,20 @@ namespace image
     void RateLimitedImagePublisher::readFileAndPublish(const char* filename, bool show, int start)
 	{
         int count = 0;
-#if(VIDEO_CAM != 1)
-        std::ifstream in(filename);
-		char imageName[1024];
-#else
-        cv::VideoCapture cap1(0);
-        cv::Mat im;
-        cap1 >> im;
-#endif
+        double t = (double)cv::getTickCount();
 
 #if(VIDEO_CAM == 1)
-        while(!im.empty())
+//        cv::VideoCapture cap1("/media/localuser/Default/workspace/data/seqSlam_test_data/s11-laptopCam-070116/3.tamperedVideoSegment/4-s11-laptopCam-converted-fullWithNoise.avi");
+        cv::VideoCapture cap1("/media/localuser/Default/workspace/data/seqSlam_test_data/s11-guiabot/left/stereo-left.avi");
+        cv::Mat im;
+        int imgCounter = 0;
+
+        while(1)
 #else
-		while(in.good() and in.peek()!=in.eof())
+        std::ifstream in(filename);
+        char imageName[1024];
+
+        while(in.good() and in.peek()!=in.eof())
 #endif
 		{
 			if(count < start )
@@ -104,14 +105,22 @@ namespace image
 			}
 
 
-#if(VIDEO_CAM != 1)
+#if(VIDEO_CAM == 0)
             in>>imageName;
             cv::Mat im = cv::imread(imageName,CV_LOAD_IMAGE_UNCHANGED);
             std::cerr<<"INFO: [ImagePublisher] :"<<topic<<" "<<imageName<<std::endl;
+            t = ((double)cv::getTickCount() - t)/cv::getTickFrequency();
+            Publish(im,t);
 #else
+            imgCounter++;
             cap1 >> im;
+            if(im.empty())
+                break;
+            //            cv::resize(im,im,cv::Size(640,480));
+//            cv::resize(im,im,cv::Size(im.cols/2,im.rows/2));
+            Publish(im,imgCounter);//(int)cap1.get(CV_CAP_PROP_POS_FRAMES));
+            std::cerr<<"INFO: [ImagePublisher] :"<<topic<<" "<<imgCounter<<std::endl;
 #endif
-			Publish(im);
 			if(show)
 			{
 				cv::imshow("image", im);

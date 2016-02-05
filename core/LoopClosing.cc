@@ -30,6 +30,8 @@
 
 #include "Thirdparty/g2o/g2o/types/sim3/types_seven_dof_expmap.h"
 
+ofstream loopClosureFile("./loopClousre.txt");
+
 namespace ORB_SLAM
 {
 
@@ -38,6 +40,7 @@ LoopClosing::LoopClosing(Map *pMap, KeyFrameDatabase *pDB, ORBVocabulary *pVoc):
 {
     mnCovisibilityConsistencyTh = 3;
     mpMatchedKF = NULL;
+    seqPR = seqSLAM(50,20);
 }
 
 void LoopClosing::SetTracker(Tracking *pTracker)
@@ -50,11 +53,89 @@ void LoopClosing::SetLocalMapper(LocalMapping *pLocalMapper)
     mpLocalMapper=pLocalMapper;
 }
 
+bool LoopClosing::Start()
+{
+    lcm::LCM lcm;
+    lcm.subscribe("/image_raw",&LoopClosing::RunSeqSLAM,this);
+
+    while(1)
+    {
+        int val = lcm.handleTimeout(3000);
+
+        if( (val == 0 && mpTracker->mState != mpTracker->NO_IMAGES_YET) || val < 0)
+            break;
+
+        ResetIfRequested();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    return false;
+}
+
+void LoopClosing::RunSeqSLAM(const lcm::ReceiveBuffer* rbuf,const std::string& chan,const ORB_Types::Image* msg)
+{
+
+    int timestamp = 0;
+    cv::Mat im = utils::image::toMat(*msg);
+    timestamp = msg->utime;
+
+    if(imgTS.empty() || timestamp >= imgTS[imgTS.size()-1] + 8)
+    {
+
+        imgTS.push_back(timestamp);
+        int loopClosureIdx = seqPR.processImg(im);
+
+        imwrite("lcSS.png",seqPR.displayImg);
+    }
+    //ros::Rate r(200);
+
+//    while(1)//ros::ok())
+    {
+        // Check if there are keyframes in the queue
+        if(CheckNewKeyFrames())
+        {
+            // Detect loop candidates and check covisibility consistency
+//            if(DetectLoop())
+            if(DetectLoopSeqSLAM2())
+            {
+                loopClosureFile << mvpEnoughConsistentCandidates[0]->mTimeStamp << "\t";
+
+               // Compute similarity transformation [sR|t]
+               if(ComputeSim32())
+               {
+//                   KeyFrame* pKF = mvpEnoughConsistentCandidates[0];
+//                   pKF->SetNotErase();
+//                   ORBmatcher matcher(0.75,true);
+
+//                   vector<MapPoint*> vpMapPointMatches;
+//                   int nmatches = matcher.SearchByBoW(mpCurrentKF,pKF,vpMapPointMatches);
+//                   mvpCurrentMatchedPoints = vpMapPointMatches;
+
+//                   mpMatchedKF = pKF;
+//                    g2o::Sim3 gSmw;//(Converter::toMatrix3d(mpCurrentKF->GetRotation()),Converter::toVector3d(mpCurrentKF->GetTranslation()),1.0);
+//                    mg2oScw = /*gScm**/gSmw;
+                   // Perform loop fusion and pose graph optimization
+                   CorrectLoop();
+                   loopClosureFile << 1 << endl;
+               }
+//               else
+//                   loopClosureFile << -1 << endl;
+            }
+        }
+
+//        ResetIfRequested();
+//        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+
+    }
+}
 
 void LoopClosing::Run()
 {
 
     //ros::Rate r(200);
+
+    seqSLAM seqPR(50,20);
+    vector<KeyFrame*> kfDbSS;
 
     while(1)//ros::ok())
     {
@@ -62,14 +143,25 @@ void LoopClosing::Run()
         if(CheckNewKeyFrames())
         {
             // Detect loop candidates and check covisibility consistency
+#if(SSLC == 1)
+            if(DetectLoopSeqSLAM(seqPR,kfDbSS))
+#else
             if(DetectLoop())
+#endif
             {
+                loopClosureFile << mpCurrentKF->mTimeStamp << "\t" << mpCurrentKF->mnId << "\t" <<
+                                   kfDbSS.size()-1 << "\t" <<
+                                   seqPR.loopClosureIdx[seqPR.loopClosureIdx.size()-1] << "\t";
+
                // Compute similarity transformation [sR|t]
                if(ComputeSim3())
                {
                    // Perform loop fusion and pose graph optimization
                    CorrectLoop();
+                   loopClosureFile << 1 << endl;
                }
+               else
+                   loopClosureFile << -1 << endl;
             }
         }
 
@@ -91,6 +183,140 @@ bool LoopClosing::CheckNewKeyFrames()
 
 	std::lock_guard<std::mutex> lock(mMutexLoopQueue);
     return(!mlpLoopKeyFrameQueue.empty());
+}
+
+bool LoopClosing::DetectLoopSeqSLAM2()
+{
+    mvpEnoughConsistentCandidates.clear();
+
+    {
+        std::lock_guard<std::mutex> lock(mMutexLoopQueue);
+        mpCurrentKF = mlpLoopKeyFrameQueue.front();
+        mlpLoopKeyFrameQueue.pop_front();
+        // Avoid that a keyframe can be erased while it is being process by this thread
+        mpCurrentKF->SetNotErase();
+    }
+
+//    //If the map contains less than 10 KF or less than 10KF have passed from last loop detection
+//    if(mpCurrentKF->mnId<mLastLoopKFid+10)
+//    {
+//        mpKeyFrameDB->add(mpCurrentKF);
+//        kfDb.push_back(mpCurrentKF);
+//        mpCurrentKF->SetErase();
+//        return false;
+//    }
+
+    kfDb.push_back(mpCurrentKF);
+    int kfId = mpCurrentKF->mTimeStamp;
+
+    // Search kfId in imgTS
+    int imgIdx = -1;
+    for(int i1=imgTS.size()-1; i1>=0; i1--)
+    {
+//        if(imgTS[i1] == kfId)
+        if( abs(imgTS[i1] - kfId) <= 5 )
+        {
+            imgIdx = i1;
+            break;
+        }
+//        if(kfId > imgTS[i1])
+//            break;
+    }
+
+    // If KF is there in ImgIds
+    if(imgIdx != -1)
+    {
+        // Check if it had a loop closure
+        int loopClosingId = seqPR.loopClosureIdx[imgIdx];
+        if(loopClosingId != -1)
+        {
+            cout << "Loop closure at TS " << kfId << endl;
+            loopClosureFile << imgTS[imgTS.size()-1] << "\t" << kfId << "\t";
+
+            int loopClosingTS = imgTS[loopClosingId];
+            // Check if the loop closing timestamp is also a KF
+            for(int i1=1; i1<kfDb.size(); i1++) // i1 = 0 gives segmentation fault
+            {
+                if(abs((int)kfDb[i1]->mTimeStamp - loopClosingTS) <= 5 && !kfDb[i1]->isBad())
+                {
+//                    Mat candidateKFimg = mpCurrentKF->im.clone();
+//                    Mat temperImg = candidateKFimg.clone();
+//                    candidateKFimg.colRange(0,candidateKFimg.cols-30).copyTo(temperImg.colRange(30,temperImg.cols));
+//                    Mat blackImg = Mat::zeros(candidateKFimg.rows, 30, candidateKFimg.type());
+//                    blackImg.copyTo(temperImg.colRange(0,30));
+
+//                    Frame extra = Frame(temperImg,kfDb[i1]->mTimeStamp,mpTracker->mpIniORBextractor,
+//                                        mpORBVocabulary,mpTracker->mK,mpTracker->mDistCoef);
+
+//                    KeyFrame* extraKf = new KeyFrame(extra,mpMap,mpKeyFrameDB);
+
+//                    mvpEnoughConsistentCandidates.push_back(extraKf);
+                    mvpEnoughConsistentCandidates.push_back(kfDb[i1]);
+                    break;
+                }
+            }
+            if(mvpEnoughConsistentCandidates.empty())
+                cout << "Loop closing frame TS " << loopClosingTS << " not found." << endl;
+        }
+    }
+    else
+    {
+        cout << "KF " << mpCurrentKF->mnId << " and TS " << kfId << " not found in ImgTS " <<
+                imgTS[imgTS.size()-3] << " " << imgTS[imgTS.size()-2] << " " <<
+                imgTS[imgTS.size()-1] << " ..." << endl;
+    }
+
+    // Add Current Keyframe to database
+    mpKeyFrameDB->add(mpCurrentKF);
+
+    if(mvpEnoughConsistentCandidates.empty())
+    {
+        if(imgIdx != -1 && seqPR.loopClosureIdx[imgIdx] != -1)
+            loopClosureFile << -1 << "\t" << -1 << endl;
+
+        mpCurrentKF->SetErase();
+        return false;
+    }
+    else
+    {
+        return true;
+    }
+
+}
+
+
+bool LoopClosing::DetectLoopSeqSLAM(seqSLAM& seqPR, vector<KeyFrame*>& kfDbSS)
+{
+    mvpEnoughConsistentCandidates.clear();
+    {
+        std::lock_guard<std::mutex> lock(mMutexLoopQueue);
+        mpCurrentKF = mlpLoopKeyFrameQueue.front();
+        mlpLoopKeyFrameQueue.pop_front();
+        // Avoid that a keyframe can be erased while it is being process by this thread
+        mpCurrentKF->SetNotErase();
+    }
+
+    int loopClosureIdx = seqPR.processImg(mpCurrentKF->GetImage());
+
+    imwrite("lcSS.png",seqPR.displayImg);
+
+    if(loopClosureIdx != -1)
+        mvpEnoughConsistentCandidates.push_back(kfDbSS[loopClosureIdx]);
+
+    // Add Current Keyframe to database
+    mpKeyFrameDB->add(mpCurrentKF);
+    kfDbSS.push_back(mpCurrentKF);
+
+    if(mvpEnoughConsistentCandidates.empty())
+    {
+        mpCurrentKF->SetErase();
+        return false;
+    }
+    else
+    {
+        return true;
+    }
+
 }
 
 bool LoopClosing::DetectLoop()
@@ -220,6 +446,155 @@ bool LoopClosing::DetectLoop()
 
     mpCurrentKF->SetErase();
     return false;
+}
+
+bool LoopClosing::ComputeSim32()
+{
+    KeyFrame* pKF = mvpEnoughConsistentCandidates[0];
+    pKF->SetNotErase();
+
+    if(pKF->isBad() || pKF == NULL)
+    {
+        mvpEnoughConsistentCandidates[0]->SetErase();
+        mpCurrentKF->SetErase();
+        cout << "pkf is bad" << endl;
+        return false;
+    }
+
+    ORBmatcher matcher(0.75,true);
+
+    vector<MapPoint*> vvpMapPointMatches;
+    int nmatches = matcher.SearchByBoW(mpCurrentKF,pKF,vvpMapPointMatches);
+
+    if(nmatches<5)
+    {
+        mvpEnoughConsistentCandidates[0]->SetErase();
+        mpCurrentKF->SetErase();
+        cout << "Initial matching low (<10)" << endl;
+        return false;
+    }
+
+    Sim3Solver* pSolver = new Sim3Solver(mpCurrentKF,pKF,vvpMapPointMatches);
+    pSolver->SetRansacParameters(0.75,5,300);
+
+    vector<bool> vbInliers;
+    int nInliers;
+    bool bNoMore;
+    cv::Mat Scm  = pSolver->iterate(300,bNoMore,vbInliers,nInliers);
+
+    bool bMatch = false;
+
+    // If RANSAC returns a Sim3, perform a guided matching and optimize with all correspondences
+    if(!Scm.empty())
+    {
+        vector<MapPoint*> vpMapPointMatches(vvpMapPointMatches.size(), static_cast<MapPoint*>(NULL));
+        for(size_t j=0, jend=vbInliers.size(); j<jend; j++)
+        {
+            if(vbInliers[j])
+               vpMapPointMatches[j]=vvpMapPointMatches[j];
+        }
+
+        cv::Mat R = pSolver->GetEstimatedRotation();
+        cv::Mat t = pSolver->GetEstimatedTranslation();
+        const float s = pSolver->GetEstimatedScale();
+        matcher.SearchBySim3(mpCurrentKF,pKF,vpMapPointMatches,s,R,t,7.5);
+
+
+        g2o::Sim3 gScm(Converter::toMatrix3d(R),Converter::toVector3d(t),s);
+        const int nInliers = Optimizer::OptimizeSim3(mpCurrentKF, pKF, vpMapPointMatches, gScm, 10);
+
+        // If optimization is succesful stop ransacs and continue
+//        if(nInliers>=20)
+        if(nInliers>=5)
+        {
+            bMatch = true;
+            mpMatchedKF = pKF;
+            g2o::Sim3 gSmw(Converter::toMatrix3d(pKF->GetRotation()),Converter::toVector3d(pKF->GetTranslation()),1.0);
+            mg2oScw = gScm*gSmw;
+            mScw = Converter::toCvMat(mg2oScw);
+
+            mvpCurrentMatchedPoints = vpMapPointMatches;
+//            break;
+        }
+        else
+        {
+            bMatch = true;
+            mpMatchedKF = pKF;
+            g2o::Sim3 gSmw;//(Converter::toMatrix3d(pKF->GetRotation()),Converter::toVector3d(pKF->GetTranslation()),1.0);
+            mg2oScw = gScm*gSmw;
+            mScw = Converter::toCvMat(mg2oScw);
+
+            mvpCurrentMatchedPoints = vpMapPointMatches;
+//            break;
+        }
+    }
+    else
+    {
+        mvpEnoughConsistentCandidates[0]->SetErase();
+        mpCurrentKF->SetErase();
+        cout << "Sim pose not found" << endl;
+        return false;
+    }
+
+    if(!bMatch && !Scm.empty())
+    {
+//        for(int i=0; i<nInitialCandidates; i++)
+             mvpEnoughConsistentCandidates[0]->SetErase();
+        mpCurrentKF->SetErase();
+        cout << "Inliers < 10 after guided matching" << endl;
+        return false;
+    }
+
+    // Retrieve MapPoints seen in Loop Keyframe and neighbors
+
+    vector<KeyFrame*> vpLoopConnectedKFs = mpMatchedKF->GetVectorCovisibleKeyFrames();
+    vpLoopConnectedKFs.push_back(mpMatchedKF);
+    mvpLoopMapPoints.clear();
+    for(vector<KeyFrame*>::iterator vit=vpLoopConnectedKFs.begin(); vit!=vpLoopConnectedKFs.end(); vit++)
+    {
+        KeyFrame* pKF = *vit;
+        vector<MapPoint*> vpMapPoints = pKF->GetMapPointMatches();
+        for(size_t i=0, iend=vpMapPoints.size(); i<iend; i++)
+        {
+            MapPoint* pMP = vpMapPoints[i];
+            if(pMP)
+            {
+                if(!pMP->isBad() && pMP->mnLoopPointForKF!=mpCurrentKF->mnId)
+                {
+                    mvpLoopMapPoints.push_back(pMP);
+                    pMP->mnLoopPointForKF=mpCurrentKF->mnId;
+                }
+            }
+        }
+    }
+
+    // Find more matches projecting with the computed Sim3
+    matcher.SearchByProjection(mpCurrentKF, mScw, mvpLoopMapPoints, mvpCurrentMatchedPoints,10);
+
+    // If enough matches accept Loop
+    int nTotalMatches = 0;
+    for(size_t i=0; i<mvpCurrentMatchedPoints.size(); i++)
+    {
+        if(mvpCurrentMatchedPoints[i])
+            nTotalMatches++;
+    }
+
+//    if(nTotalMatches>=40)
+    if(nTotalMatches>=5)
+    {
+//        for(int i=0; i<nInitialCandidates; i++)
+//            if(mvpEnoughConsistentCandidates[i]!=mpMatchedKF)
+//                mvpEnoughConsistentCandidates[i]->SetErase();
+        return true;
+    }
+    else
+    {
+//        for(int i=0; i<nInitialCandidates; i++)
+            mvpEnoughConsistentCandidates[0]->SetErase();
+        mpCurrentKF->SetErase();
+        cout << "Total matches < 10 finally" << endl;
+        return false;
+    }
 }
 
 bool LoopClosing::ComputeSim3()
@@ -499,7 +874,7 @@ void LoopClosing::CorrectLoop()
         {
             MapPoint* pLoopMP = mvpCurrentMatchedPoints[i];
             MapPoint* pCurMP = mpCurrentKF->GetMapPoint(i);
-            if(pCurMP)
+            if(pCurMP && i < mpCurrentKF->GetMapPointMatches().size()) // Code fails without second check
                 pCurMP->Replace(pLoopMP);
             else
             {
@@ -604,6 +979,7 @@ void LoopClosing::ResetIfRequested()
         mlpLoopKeyFrameQueue.clear();
         mLastLoopKFid=0;
         mbResetRequested=false;
+        kfDb.clear();
     }
 }
 
